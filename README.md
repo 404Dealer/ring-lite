@@ -7,6 +7,9 @@ browser** over WebRTC.
 > **Unofficial.** Ring has no public API. ring-lite speaks the private one Ring's own apps use. It isn't affiliated
 > with or endorsed by Ring or Amazon, and Ring can change that API at any time, which will break things until
 > ring-lite is updated.
+>
+> **Maintained as I use it.** I run ring-lite for my own cameras and fix it when Ring breaks it for me, with no
+> promises beyond that. Issues and pull requests are welcome.
 
 ## Why another Ring library?
 
