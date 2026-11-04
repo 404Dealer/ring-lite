@@ -1,0 +1,6 @@
+node_modules/
+*.tgz
+# a sign-in is a full login to someone's Ring account
+*token*.json
+*.tmp
+.env

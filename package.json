@@ -1,0 +1,37 @@
+{
+  "name": "ring-lite",
+  "version": "0.1.0",
+  "description": "A small, dependency-free client for Ring cameras: snapshots, events, clips, controls and WebRTC live view in your own browser. Unofficial.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.mjs"
+    }
+  },
+  "types": "./index.d.ts",
+  "bin": {
+    "ring-lite-signin": "bin/ring-lite-signin.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "index.d.ts",
+    "bin/"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "keywords": [
+    "ring",
+    "ring camera",
+    "doorbell",
+    "webrtc",
+    "home automation",
+    "zero dependencies"
+  ],
+  "author": "404Dealer",
+  "license": "MIT"
+}

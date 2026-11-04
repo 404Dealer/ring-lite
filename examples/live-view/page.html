@@ -1,0 +1,97 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ring-lite live view</title>
+<style>
+  body { font: 15px system-ui, sans-serif; margin: 2rem; background: #111; color: #eee; }
+  button { font: inherit; margin: 0 .5rem .5rem 0; padding: .4rem .9rem; }
+  video { display: block; width: min(100%, 960px); background: #000; margin-top: 1rem; }
+  #state { color: #aaa; }
+</style>
+<div id="cameras"></div>
+<button id="talk" hidden>Hold to talk</button><button id="stop" hidden>Stop</button>
+<span id="state"></span>
+<video id="video" autoplay playsinline muted controls></video>
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const say = (text) => ($("state").textContent = text);
+const post = async (action, body) => {
+  const res = await fetch(`/${action}`, { method: "POST", headers: { "content-type": "application/json", "x-ring-lite": "1" }, body: JSON.stringify(body), keepalive: action === "end" });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+};
+let live = null; // { pc, sessionId, audio, mic, speaker }
+
+// Ring takes the offer whole, with no ICE candidates sent after it.
+const iceGathered = (pc, ms) => new Promise((resolve) => {
+  if (pc.iceGatheringState === "complete") return resolve();
+  const t = setTimeout(resolve, ms);
+  pc.addEventListener("icegatheringstatechange", () => {
+    if (pc.iceGatheringState === "complete") { clearTimeout(t); resolve(); }
+  });
+});
+
+function stop() {
+  if (!live) return;
+  const { pc, sessionId, mic } = live;
+  live = null;
+  mic?.getTracks().forEach((t) => t.stop());
+  pc.close();
+  if (sessionId) post("end", { sessionId }).catch(() => {});
+  $("talk").hidden = $("stop").hidden = true;
+  say("Stopped");
+}
+
+async function start(camera) {
+  stop();
+  const pc = new RTCPeerConnection();
+  const stream = new MediaStream();
+  $("video").srcObject = stream;
+  pc.ontrack = (e) => stream.addTrack(e.track);
+  pc.onconnectionstatechange = () => pc.connectionState === "failed" && say("The video connection failed");
+  // audio both ways (nothing is sent until Hold to talk), video from the camera only
+  const audio = pc.addTransceiver("audio", { direction: "sendrecv" });
+  pc.addTransceiver("video", { direction: "recvonly" });
+  live = { pc, audio };
+  try {
+    say("Asking Ring…");
+    await pc.setLocalDescription(await pc.createOffer());
+    await iceGathered(pc, 5000);
+    const { sessionId, sdp, maxMs } = await post("start", { cameraId: camera.id, sdp: pc.localDescription.sdp });
+    if (live?.pc !== pc) return post("end", { sessionId }).catch(() => {});
+    live.sessionId = sessionId;
+    await pc.setRemoteDescription({ type: "answer", sdp });
+    say(`Waking ${camera.name}… (Ring ends live view after ${maxMs / 60_000} minutes)`);
+    $("talk").hidden = $("stop").hidden = false;
+  } catch (e) {
+    say(e.message);
+    stop();
+  }
+}
+
+async function talk(on) {
+  if (!live) return;
+  if (on && !live.mic) {
+    live.mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    await live.audio.sender.replaceTrack(live.mic.getAudioTracks()[0]);
+  }
+  if (on && !live.speaker) {
+    await post("talk", { sessionId: live.sessionId });
+    live.speaker = true;
+  }
+  live.mic?.getAudioTracks().forEach((t) => (t.enabled = on));
+}
+
+$("stop").onclick = stop;
+$("talk").onpointerdown = () => talk(true).catch((e) => say(e.message));
+$("talk").onpointerup = $("talk").onpointerleave = () => talk(false);
+addEventListener("pagehide", stop);
+$("video").onplaying = () => say("Live");
+
+for (const camera of await (await fetch("/cameras")).json()) {
+  const b = document.createElement("button");
+  b.textContent = camera.liveOff ? `${camera.name} (live view off in the Ring app)` : camera.name;
+  b.disabled = camera.liveOff;
+  b.onclick = () => start(camera);
+  $("cameras").append(b);
+}
+</script>
