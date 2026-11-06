@@ -85,7 +85,7 @@ opened live view).
 ```js
 // in the browser: audio both ways, video from the camera
 const pc = new RTCPeerConnection();
-pc.addTransceiver("audio", { direction: "sendrecv" });
+pc.addTransceiver(silentTrack, { direction: "sendrecv" }); // swap the microphone in with replaceTrack() to talk
 pc.addTransceiver("video", { direction: "recvonly" });
 await pc.setLocalDescription(await pc.createOffer());
 // wait for ICE gathering to finish: Ring takes the offer whole
@@ -99,7 +99,20 @@ await ring.enableLiveViewSpeaker(sessionId); // before talking through the camer
 await ring.endLiveView(sessionId);
 ```
 
-[`examples/live-view`](examples/live-view) is a complete one: a page with a button per camera and hold to talk.
+Three things that aren't obvious:
+
+- **Send audio from the start.** A WebRTC sender with no track sends nothing at all. Give the audio transceiver a
+  silent track (a Web Audio oscillator through a gain of 0 into a `MediaStreamAudioDestinationNode`), then
+  `replaceTrack()` the microphone in when someone talks.
+- **Turn the camera's sound up.** A Ring camera's microphone is quiet: outdoors, most of what it hears sits 45 to 70 dB
+  below full scale, which at an ordinary volume is silence. Play it through Web Audio with a gain (4× is a good
+  start) and a limiter after it. Chrome only plays a call's audio into Web Audio while a media element is playing
+  the same stream, so keep the video element on it, muted.
+- **Hold, then speak.** `enableLiveViewSpeaker()` takes a moment to reach the camera, so the first words of the first
+  press can be lost.
+
+[`examples/live-view`](examples/live-view) is a complete one: a page with a button per camera, the sound turned up,
+hold to talk, and zoom (the wheel or a pinch, drag to look around).
 
 ### Examples
 
@@ -125,8 +138,9 @@ await ring.endLiveView(sessionId);
 | `watchEvents({ onEvent, onError?, cameras?, intervalMs?, maxAgeMs? })` | Polls every 20 s. Each new event goes to `onEvent` once. Answers `{ stop() }`. |
 | `signInWithPassword({ email, password, askCode })` | For building your own sign-in. |
 
-Errors are `RingError`, carrying Ring's HTTP `status` where there was one. A `SignInError` means a person has to
-sign in again: `signedOut` is true when there's no saved sign-in at all.
+Errors are `RingError`, carrying Ring's HTTP `status` where there was one, and its message says what Ring said
+("Ring didn't start live view (HTTP 400: ...)"). A `SignInError` means a person has to sign in again: `signedOut` is
+true when there's no saved sign-in at all.
 
 ## Limits
 

@@ -170,6 +170,25 @@ test("live view: the offer goes to Ring, its answer comes back", async () => {
   await assert.rejects(client.startLiveView({ ...cam, liveOff: true }, "v=0"), /turned off/);
 });
 
+test("a refusal says what Ring said, and where a video link went", async () => {
+  const ring = fakeRing([
+    SESSION_OK,
+    [`POST ${API}integrations/v1/liveview/start`, json({ errors: [{ message: "Device   is\nbusy" }] }, 400)],
+    [`PATCH ${API}integrations/v1/liveview/options`, new Response("<html>gateway timeout</html>", { status: 504 })],
+    [`GET ${API}clients_api/dings/1/`, { url: "https://example.com/clip.mp4?sig=secret" }],
+    [`GET ${API}clients_api/dings/2/`, { recording: { status: "processing" }, code: 7 }],
+    [`GET ${API}clients_api/dings/3/`, json({ error: "not_found" }, 404)],
+  ]);
+  const client = new RingClient({ tokenStore: memoryStore(freshToken()), fetch: ring.fetch });
+  const [cam] = parseCameras(devices);
+  await assert.rejects(client.startLiveView(cam, "v=0\r\n..."), (e) => e.status === 400 && e.message === "Ring didn't start live view (HTTP 400: Device is busy)");
+  await assert.rejects(client.enableLiveViewSpeaker("s1"), (e) => e.status === 504 && /HTTP 504: <html>gateway timeout<\/html>/.test(e.message));
+  // the host only: a pre-signed link is a key to the video
+  await assert.rejects(client.eventClip("1"), (e) => /on example\.com,/.test(e.message) && !/secret/.test(e.message));
+  await assert.rejects(client.eventClip("2"), /no link to that video \(it answered recording, code\)/);
+  await assert.rejects(client.eventClip("3"), (e) => e.status === 404 && /HTTP 404: not_found/.test(e.message));
+});
+
 test("controls go to the right endpoints, and refuse what a camera lacks", async () => {
   const ring = fakeRing([SESSION_OK, [`PUT ${API}`, {}], [`PATCH ${API}`, {}]]);
   const client = new RingClient({ tokenStore: memoryStore(freshToken()), fetch: ring.fetch });

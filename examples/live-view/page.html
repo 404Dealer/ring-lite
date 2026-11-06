@@ -4,13 +4,18 @@
 <style>
   body { font: 15px system-ui, sans-serif; margin: 2rem; background: #111; color: #eee; }
   button { font: inherit; margin: 0 .5rem .5rem 0; padding: .4rem .9rem; }
-  video { display: block; width: min(100%, 960px); background: #000; margin-top: 1rem; }
+  #stage { position: relative; width: min(100%, 960px); aspect-ratio: 16 / 9; margin-top: 1rem; overflow: hidden; background: #000; }
+  video { display: block; width: 100%; height: 100%; object-fit: contain; touch-action: none; }
+  video.zoomed { cursor: grab; }
+  #zoom { position: absolute; top: .5rem; left: .5rem; padding: .1rem .5rem; background: #000a; font: 13px ui-monospace, monospace; }
   #state { color: #aaa; }
+  #talk.on { background: #3a3; }
 </style>
 <div id="cameras"></div>
 <button id="talk" hidden>Hold to talk</button><button id="stop" hidden>Stop</button>
+<label id="louder" hidden>Louder <input id="volume" type="range" min="0" max="8" step="0.5" value="4"></label>
 <span id="state"></span>
-<video id="video" autoplay playsinline muted controls></video>
+<div id="stage"><video id="video" autoplay playsinline muted></video><span id="zoom">wheel or pinch to zoom · drag to look around · double-click for 1×</span></div>
 <script type="module">
 const $ = (id) => document.getElementById(id);
 const say = (text) => ($("state").textContent = text);
@@ -19,7 +24,26 @@ const post = async (action, body) => {
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 };
-let live = null; // { pc, sessionId, audio, mic, speaker }
+let live = null; // { pc, sessionId, audio, silence, mic, speaker }
+
+// Sound. A Ring camera's microphone is quiet (outdoors, mostly 45 to 70 dB below full scale), so the camera's audio
+// goes through Web Audio, turned up, with a limiter so a loud moment doesn't clip. The video element stays muted:
+// Chrome only plays a call's audio into Web Audio while an element is playing that stream.
+let ctx, gain;
+function audio() {
+  if (!ctx) {
+    ctx = new AudioContext();
+    gain = ctx.createGain();
+    const limit = ctx.createDynamicsCompressor();
+    limit.threshold.value = -12; limit.ratio.value = 20; limit.attack.value = 0.003; limit.release.value = 0.25;
+    gain.connect(limit).connect(ctx.destination);
+    loudness();
+  }
+  ctx.resume(); // from a click, so the browser lets it play
+  return ctx;
+}
+const loudness = (talking = false) => gain?.gain.setTargetAtTime(talking ? 0 : Number($("volume").value), ctx.currentTime, 0.03);
+$("volume").oninput = () => loudness();
 
 // Ring takes the offer whole, with no ICE candidates sent after it.
 const iceGathered = (pc, ms) => new Promise((resolve) => {
@@ -32,12 +56,13 @@ const iceGathered = (pc, ms) => new Promise((resolve) => {
 
 function stop() {
   if (!live) return;
-  const { pc, sessionId, mic } = live;
+  const { pc, sessionId, mic, silence } = live;
   live = null;
   mic?.getTracks().forEach((t) => t.stop());
+  silence?.stop();
   pc.close();
   if (sessionId) post("end", { sessionId }).catch(() => {});
-  $("talk").hidden = $("stop").hidden = true;
+  $("talk").hidden = $("stop").hidden = $("louder").hidden = true;
   say("Stopped");
 }
 
@@ -46,12 +71,21 @@ async function start(camera) {
   const pc = new RTCPeerConnection();
   const stream = new MediaStream();
   $("video").srcObject = stream;
-  pc.ontrack = (e) => stream.addTrack(e.track);
+  zoomTo(1, 0.5, 0.5);
+  pc.ontrack = (e) => {
+    stream.addTrack(e.track);
+    if (e.track.kind === "audio") audio().createMediaStreamSource(stream).connect(gain);
+  };
   pc.onconnectionstatechange = () => pc.connectionState === "failed" && say("The video connection failed");
-  // audio both ways (nothing is sent until Hold to talk), video from the camera only
-  const audio = pc.addTransceiver("audio", { direction: "sendrecv" });
+  // Audio both ways, silence until Hold to talk. A sender with no track sends nothing at all, so the call carries
+  // silence from the start and Hold to talk swaps the microphone in.
+  const out = audio().createMediaStreamDestination(), osc = ctx.createOscillator(), hush = ctx.createGain();
+  hush.gain.value = 0;
+  osc.connect(hush).connect(out);
+  osc.start();
+  const audioTransceiver = pc.addTransceiver(out.stream.getAudioTracks()[0], { direction: "sendrecv", streams: [out.stream] });
   pc.addTransceiver("video", { direction: "recvonly" });
-  live = { pc, audio };
+  live = { pc, audio: audioTransceiver, silence: osc };
   try {
     say("Asking Ring…");
     await pc.setLocalDescription(await pc.createOffer());
@@ -61,29 +95,96 @@ async function start(camera) {
     live.sessionId = sessionId;
     await pc.setRemoteDescription({ type: "answer", sdp });
     say(`Waking ${camera.name}… (Ring ends live view after ${maxMs / 60_000} minutes)`);
-    $("talk").hidden = $("stop").hidden = false;
+    $("talk").hidden = $("stop").hidden = $("louder").hidden = false;
   } catch (e) {
     say(e.message);
     stop();
   }
 }
 
+// Hold to talk: the first press asks for the microphone and turns the camera's speaker on, both at once. Ring takes a
+// moment to turn the speaker on, so hold, then speak. The camera's sound stops here while you talk, so it doesn't echo.
+let held = false;
 async function talk(on) {
+  held = on;
+  $("talk").classList.toggle("on", on);
   if (!live) return;
   if (on && !live.mic) {
-    live.mic = await navigator.mediaDevices.getUserMedia({ audio: true });
-    await live.audio.sender.replaceTrack(live.mic.getAudioTracks()[0]);
+    const [mic] = await Promise.all([
+      navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }),
+      live.speaker ? null : post("talk", { sessionId: live.sessionId }).then(() => (live.speaker = true)),
+    ]);
+    if (!live) return mic.getTracks().forEach((t) => t.stop());
+    live.mic = mic;
+    mic.getAudioTracks()[0].enabled = held;
+    await live.audio.sender.replaceTrack(mic.getAudioTracks()[0]);
   }
-  if (on && !live.speaker) {
-    await post("talk", { sessionId: live.sessionId });
-    live.speaker = true;
-  }
-  live.mic?.getAudioTracks().forEach((t) => (t.enabled = on));
+  live.mic?.getAudioTracks().forEach((t) => (t.enabled = held));
+  loudness(held);
 }
+
+// Zoom: the browser crops the picture itself (CSS object-view-box, in Chrome and Edge); elsewhere the video is scaled
+// inside its box. z: how far in, x and y: the middle of what shows, as fractions of the picture.
+const v = $("video");
+let z = 1, x = 0.5, y = 0.5;
+const CROPS = CSS.supports("object-view-box", "inset(0%)");
+function frame() { // where the picture sits in the element (object-fit: contain), unscaled, in page pixels
+  const r = v.parentElement.getBoundingClientRect();
+  const k = Math.min(r.width / (v.videoWidth || r.width), r.height / (v.videoHeight || r.height));
+  const w = (v.videoWidth || r.width) * k, h = (v.videoHeight || r.height) * k;
+  return { left: r.left + (r.width - w) / 2, top: r.top + (r.height - h) / 2, w, h, ox: (r.width - w) / 2, oy: (r.height - h) / 2 };
+}
+function zoomTo(nz, nx, ny) {
+  z = Math.min(Math.max(nz, 1), 8);
+  if (z < 1.02) z = 1;
+  const s = 1 / z;
+  x = Math.min(Math.max(nx, s / 2), 1 - s / 2);
+  y = Math.min(Math.max(ny, s / 2), 1 - s / 2);
+  const left = x - s / 2, top = y - s / 2, pct = (n) => `${(n * 100).toFixed(3)}%`;
+  if (CROPS) v.style.objectViewBox = z > 1 ? `inset(${pct(top)} ${pct(1 - left - s)} ${pct(1 - top - s)} ${pct(left)})` : "";
+  else {
+    const f = frame();
+    v.style.transformOrigin = "0 0";
+    v.style.transform = z > 1 ? `translate(${f.ox - z * (f.ox + left * f.w)}px, ${f.oy - z * (f.oy + top * f.h)}px) scale(${z})` : "";
+  }
+  v.classList.toggle("zoomed", z > 1);
+  $("zoom").textContent = z > 1 ? `${z.toFixed(1)}×` : "wheel or pinch to zoom · drag to look around · double-click for 1×";
+}
+function zoomAt(px, py, by) { // keeps the point under (px, py) where it is
+  const f = frame(), s = 1 / z, u = Math.min(Math.max((px - f.left) / f.w, 0), 1), q = Math.min(Math.max((py - f.top) / f.h, 0), 1);
+  const nz = Math.min(Math.max(z * by, 1), 8);
+  zoomTo(nz, x - s / 2 + u * s + (0.5 - u) / nz, y - s / 2 + q * s + (0.5 - q) / nz);
+}
+v.addEventListener("loadedmetadata", () => zoomTo(z, x, y));
+v.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  zoomAt(e.clientX, e.clientY, Math.exp(-(e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY) * 0.002));
+}, { passive: false });
+v.addEventListener("dblclick", (e) => (z > 1 ? zoomTo(1, 0.5, 0.5) : zoomAt(e.clientX, e.clientY, 2.5)));
+const pointers = new Map();
+v.addEventListener("pointerdown", (e) => {
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  v.setPointerCapture(e.pointerId);
+});
+v.addEventListener("pointermove", (e) => {
+  const p = pointers.get(e.pointerId);
+  if (!p) return;
+  if (pointers.size >= 2) { // a pinch: zoom by how far the fingers moved apart, about the middle of them
+    const [a, b] = pointers.values();
+    const d0 = Math.hypot(a.x - b.x, a.y - b.y);
+    Object.assign(p, { x: e.clientX, y: e.clientY });
+    if (d0 > 10) zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, Math.hypot(a.x - b.x, a.y - b.y) / d0);
+  } else {
+    const f = frame();
+    zoomTo(z, x - (e.clientX - p.x) / (f.w * z), y - (e.clientY - p.y) / (f.h * z));
+    Object.assign(p, { x: e.clientX, y: e.clientY });
+  }
+});
+for (const type of ["pointerup", "pointercancel"]) v.addEventListener(type, (e) => pointers.delete(e.pointerId));
 
 $("stop").onclick = stop;
 $("talk").onpointerdown = () => talk(true).catch((e) => say(e.message));
-$("talk").onpointerup = $("talk").onpointerleave = () => talk(false);
+$("talk").onpointerup = $("talk").onpointerleave = () => talk(false).catch(() => {});
 addEventListener("pagehide", stop);
 $("video").onplaying = () => say("Live");
 

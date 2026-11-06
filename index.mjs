@@ -218,6 +218,32 @@ export function mediaUrl(u) {
   }
 }
 
+// What Ring said when it refused something, kept short: its error fields if it answered JSON, else the start of
+// what it sent. Ring's errors are plain words ("Device is busy"), never the token, which only goes the other way.
+async function reasonOf(res) {
+  const text = await res.text().catch(() => "");
+  let body = null;
+  try {
+    body = JSON.parse(text);
+  } catch {}
+  const first = (x) => (Array.isArray(x) ? x[0] : x);
+  const field = body && typeof body === "object"
+    ? [body.error_description, body.error, body.message, body.reason, first(body.errors)?.message, first(body.errors)]
+      .find((v) => typeof v === "string" && v.trim())
+    : null;
+  const why = String(field ?? text).replace(/\s+/g, " ").trim().slice(0, 200);
+  return why ? `HTTP ${res.status}: ${why}` : `HTTP ${res.status}`;
+}
+
+// The host a link points at, to say where Ring sent something without repeating a pre-signed link.
+function hostOf(u) {
+  try {
+    return new URL(u).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
 // --- the client ---------------------------------------------------------------------------------------------------
 
 const cameraId = (camera) => String(camera?.id ?? camera);
@@ -328,13 +354,13 @@ export class RingClient {
 
   async #json(url, what, options) {
     const res = await this.#api(url, options);
-    if (!res.ok) throw new RingError(`${what} answered HTTP ${res.status}`, { status: res.status });
+    if (!res.ok) throw new RingError(`${what} answered ${await reasonOf(res)}`, { status: res.status });
     return res.json();
   }
 
   async #act(url, what, options) {
     const res = await this.#api(url, options);
-    if (!res.ok) throw new RingError(`Ring didn't ${what} (HTTP ${res.status})`, { status: res.status });
+    if (!res.ok) throw new RingError(`Ring didn't ${what} (${await reasonOf(res)})`, { status: res.status });
   }
 
   // The account's doorbells and cameras. Ring's cloud answers this without waking any camera.
@@ -396,9 +422,15 @@ export class RingClient {
   // An event's video clip (an MP4), once the event is ready. event: an event or its id.
   async eventClip(event, { maxBytes = CLIP_MAX } = {}) {
     const res = await this.#api(`${API_URL}clients_api/dings/${enc(String(event?.id ?? event))}/share/play?disable_redirect=true`);
+    if (!res.ok) throw new RingError(`Ring gave no video for that event (${await reasonOf(res)})`, { status: res.status });
     const body = await res.json().catch(() => ({}));
     const url = mediaUrl(body.url);
-    if (!res.ok || !url) throw new RingError(`Ring gave no video for that event (HTTP ${res.status})`, { status: res.ok ? 404 : res.status });
+    if (!url) {
+      const host = hostOf(body.url);
+      throw new RingError(host
+        ? `Ring's link to that video is on ${host}, which isn't Ring's video storage`
+        : `Ring gave no link to that video (it answered ${Object.keys(body).join(", ") || "nothing"})`, { status: 404 });
+    }
     return this.fetchMedia(url, { maxBytes });
   }
 
@@ -463,11 +495,9 @@ export class RingClient {
       json: { session_id: sessionId, device_id: camera?.deviceId ?? Number(cameraId(camera)), sdp: sdpOffer, protocol: "webrtc" },
       timeoutMs: 30_000,
     });
+    if (!res.ok) throw new RingError(`Ring didn't start live view (${await reasonOf(res)})`, { status: res.status });
     const answer = await res.json().catch(() => ({}));
-    if (!res.ok || typeof answer.sdp !== "string") {
-      const why = answer.error_description || answer.error || answer.message || `HTTP ${res.status}`;
-      throw new RingError(`Ring didn't start live view (${why})`, { status: res.status });
-    }
+    if (typeof answer.sdp !== "string") throw new RingError("Ring started live view but sent no SDP answer", { status: 502 });
     return { sessionId, sdp: answer.sdp, maxMs: LIVE_VIEW_MAX_MS };
   }
 

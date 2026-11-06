@@ -1,6 +1,6 @@
 {
   "name": "ring-lite",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A small, dependency-free client for Ring cameras: snapshots, events, clips, controls and WebRTC live view in your own browser. Unofficial.",
   "type": "module",
   "exports": {
